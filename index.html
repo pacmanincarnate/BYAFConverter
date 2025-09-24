@@ -19,18 +19,6 @@
             border-color: #3b82f6;
             background-color: #eff6ff;
         }
-        .prose code {
-            color: #d63384;
-            background-color: #f8f9fa;
-            padding: 2px 4px;
-            border-radius: 3px;
-            font-size: 0.9em;
-        }
-        .prose pre {
-            background-color: #f1f3f5;
-            border-radius: 6px;
-            padding: 1rem;
-        }
     </style>
 </head>
 <body class="bg-gray-50 text-gray-800 flex items-center justify-center min-h-screen p-4">
@@ -52,10 +40,11 @@
                             </svg>
                             <p class="mt-4 text-sm text-gray-600"><span class="font-semibold text-blue-600">Click to upload</span> or drag and drop</p>
                             <p class="text-xs text-gray-500 mt-1">PNG or .BYAF file</p>
+                             <p class="text-xs text-gray-500 mt-1 italic">iOS users: Your .byaf file may look like a gray icon. This is normal, please select it.</p>
                             <p id="file-name" class="text-sm font-medium text-gray-700 mt-2"></p>
                         </div>
                     </label>
-                    <input id="file-upload" name="file-upload" type="file" class="sr-only" accept="image/png,application/zip,.byaf">
+                    <input id="file-upload" name="file-upload" type="file" class="sr-only">
                 </div>
 
                 <!-- Status and Download Area -->
@@ -135,11 +124,21 @@
         
         if (file.type === 'image/png' || lowerCaseName.endsWith('.png')) {
             await convertPngToByaf(file);
-        } else if (file.type === 'application/zip' || lowerCaseName.endsWith('.zip') || lowerCaseName.endsWith('.byaf')) {
+        } else if (file.type === 'application/zip' || lowerCaseName.endsWith('.zip') || lowerCaseName.endsWith('.byaf') || file.type === 'application/x-zip-compressed') {
             await convertByafToPng(file);
         } else {
             updateStatus('Error: Unsupported file type. Please upload a PNG or a .byaf archive.', true);
         }
+    }
+    
+    // **FIX**: New robust base64 encoding function to handle special characters.
+    /**
+     * Safely encodes a string to Base64, handling Unicode characters correctly.
+     * @param {string} str The string to encode.
+     * @returns {string} The Base64 encoded string.
+     */
+    function utf8_to_b64(str) {
+        return btoa(unescape(encodeURIComponent(str)));
     }
 
     /**
@@ -151,49 +150,58 @@
             updateStatus('Reading BYAF archive...');
             const zip = await JSZip.loadAsync(file);
 
-            updateStatus('Parsing manifest...');
+            updateStatus('Locating files in archive...');
+            const characterFile = zip.file(/character\.json$/i)[0];
+            const scenarioFile = zip.file(/scenario\d*\.json$/i)[0];
+            const imageFile = zip.file(/\.png$/i)[0];
             const manifestFile = zip.file('manifest.json');
-            if (!manifestFile) throw new Error('manifest.json not found in archive.');
-            const manifest = JSON.parse(await manifestFile.async('string'));
 
-            if (!manifest.characters || manifest.characters.length === 0) throw new Error('No characters found in manifest.');
-            
-            const characterPath = manifest.characters[0].path;
-            const scenarioPath = manifest.scenarios[0].path;
+
+            if (!characterFile) throw new Error('Could not find character.json in the archive.');
+            if (!scenarioFile) throw new Error('Could not find a scenario file (e.g., scenario.json or scenario1.json) in the archive.');
+            if (!imageFile) throw new Error('Could not find a PNG image in the archive.');
 
             updateStatus('Parsing character data...');
-            const characterFile = zip.file(characterPath);
-            if (!characterFile) throw new Error(`Character file not found at ${characterPath}`);
             const character = JSON.parse(await characterFile.async('string'));
-
+            
             updateStatus('Parsing scenario data...');
-            const scenarioFile = zip.file(scenarioPath);
-            if (!scenarioFile) throw new Error(`Scenario file not found at ${scenarioPath}`);
             const scenario = JSON.parse(await scenarioFile.async('string'));
+
+            let authorName = "Unknown";
+            if (manifestFile) {
+                 const manifest = JSON.parse(await manifestFile.async('string'));
+                 if (manifest.author && manifest.author.name) {
+                    authorName = manifest.author.name;
+                 }
+            }
             
             updateStatus('Extracting profile image...');
-            const imagePath = `characters/${character.id}/${character.images[0].path}`;
-            const imageFile = zip.file(imagePath);
-            if (!imageFile) throw new Error(`Image file not found at ${imagePath}`);
             const imageBuffer = await imageFile.async('arraybuffer');
 
             updateStatus('Reconstructing V2 data...');
+            // Remap BYAF fields to V2 fields
             const v2Data = {
-                name: character.name, description: character.description, personality: character.persona,
-                creator_notes: character.metadata?.creator_notes, creator: manifest.author?.name, tags: character.tags,
-                system_prompt: scenario.model_config?.system_prompt, post_history_instructions: scenario.model_config?.post_history_instructions,
-                character_book: { entries: character.lore || [] }
+                name: character.displayName || character.name,
+                description: character.persona, // V2 description is often the persona
+                personality: '', // V2 personality often empty when persona is used
+                creator: authorName,
+                tags: Array.isArray(character.tags) ? character.tags : [],
+                character_book: { entries: character.loreItems || [] }
             };
 
-            // Heuristics to reconstruct greetings from scenario messages
-            const assistantMessages = scenario.messages.filter(m => m.role === 'assistant');
-            if (assistantMessages.length > 0) v2Data.first_mes = assistantMessages.shift().content;
-            v2Data.alternate_greetings = assistantMessages.map(m => m.content);
-            const exampleDialogue = scenario.messages
-                .map(m => `{{${m.role === 'user' ? 'user' : 'char'}}}
-${m.content}`)
-                .join('\n');
-            v2Data.mes_example = `<START>\n${exampleDialogue}`;
+            // Reconstruct greetings and examples
+            if(scenario.firstMessages && scenario.firstMessages.length > 0) {
+                v2Data.first_mes = scenario.firstMessages[0].text;
+            }
+            if(scenario.exampleMessages && scenario.exampleMessages.length > 0) {
+                 v2Data.mes_example = scenario.exampleMessages.map(e => e.text).join('\n\n');
+            }
+            
+            // Map model-specific fields if they exist
+            if(scenario.formattingInstructions) {
+                 v2Data.system_prompt = scenario.formattingInstructions;
+            }
+
 
             const v2Object = { spec: 'chara_card_v2', data: v2Data };
             
@@ -249,7 +257,8 @@ ${m.content}`)
             
             updateStatus(`Conversion successful for "${charName}"! Ready to download.`, false, true);
             downloadButton.disabled = false;
-        } catch (error) {
+        } catch (error)
+        {
             console.error('PNG to BYAF conversion failed:', error);
             updateStatus(`Error: ${error.message}`, true);
         }
@@ -302,49 +311,42 @@ ${m.content}`)
 
     /** Injects a new zTXt chunk with character data into a PNG ArrayBuffer. */
     async function injectDataIntoPng(imageBuffer, v2Object) {
-        const dataToInject = btoa(JSON.stringify(v2Object));
-        const compressedData = pako.deflate(dataToInject);
+        // Use the robust encoding function here
+        const dataToInject = utf8_to_b64(JSON.stringify(v2Object));
+        const compressedData = pako.deflate(atob(dataToInject)); // We must decode from b64 before compressing
         const keyword = 'chara';
         const chunkData = new Uint8Array(keyword.length + 2 + compressedData.length);
         
-        // Build chunk data: keyword + null separator + compression method + compressed data
         chunkData.set(new TextEncoder().encode(keyword));
-        chunkData[keyword.length] = 0; // Null separator
-        chunkData[keyword.length + 1] = 0; // Compression method 0 (deflate)
+        chunkData[keyword.length] = 0; 
+        chunkData[keyword.length + 1] = 0;
         chunkData.set(compressedData, keyword.length + 2);
 
-        // Build the full chunk
         const chunkType = new TextEncoder().encode('zTXt');
         const dataWithChunkType = new Uint8Array(chunkType.length + chunkData.length);
         dataWithChunkType.set(chunkType);
         dataWithChunkType.set(chunkData, chunkType.length);
         const crc = crc32(dataWithChunkType);
 
-        // Find IEND chunk to inject before it
         const originalPng = new Uint8Array(imageBuffer);
         let iendOffset = -1;
         for (let i = 8; i < originalPng.length; i++) {
             if (originalPng[i] === 73 && originalPng[i+1] === 69 && originalPng[i+2] === 78 && originalPng[i+3] === 68) {
-                iendOffset = i - 4; // Start of IEND chunk length
+                iendOffset = i - 4; 
                 break;
             }
         }
         if (iendOffset === -1) throw new Error('Could not find IEND chunk in image.');
         
-        const newPngSize = iendOffset + 12 + chunkData.length + 12; // 12 bytes for chunk overhead, 12 for IEND
+        const newPngSize = iendOffset + 12 + chunkData.length + 12;
         const newPng = new Uint8Array(newPngSize);
         const newPngView = new DataView(newPng.buffer);
 
-        // Copy original PNG data up to IEND
         newPng.set(originalPng.slice(0, iendOffset));
-
-        // Add our new chunk
         newPngView.setUint32(iendOffset, chunkData.length);
         newPng.set(chunkType, iendOffset + 4);
         newPng.set(chunkData, iendOffset + 8);
         newPngView.setUint32(iendOffset + 8 + chunkData.length, crc);
-
-        // Add back the IEND chunk
         newPng.set(originalPng.slice(iendOffset, iendOffset + 12), iendOffset + 12 + chunkData.length);
         
         return new Blob([newPng], { type: 'image/png' });
@@ -356,7 +358,7 @@ ${m.content}`)
         const characterId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8); return v.toString(16); });
         const scenarioId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8); return v.toString(16); });
         const manifest = { format: "byaf", version: "1.0", created_at: new Date().toISOString(), author: { name: characterData.creator || "Unknown" }, characters: [{ id: characterId, path: `characters/${characterId}/character.json` }], scenarios: [{ id: scenarioId, path: `scenarios/${scenarioId}.json` }] };
-        const character = { id: characterId, spec: "byaf-char:1.0", name: characterData.name || "", description: characterData.description || "", persona: characterData.personality || "", images: [{ label: "profile", path: `images/profile.png` }], lore: [], tags: characterData.tags || [], metadata: { creator_notes: characterData.creator_notes || "" } };
+        const character = { id: characterId, spec: "byaf-char:1.0", name: characterData.name || "", description: characterData.description || "", persona: characterData.personality || "", images: [{ label: "profile", path: `images/profile.png` }], lore: [], tags: Array.isArray(characterData.tags) ? characterData.tags : [], metadata: { creator_notes: characterData.creator_notes || "" } };
         if (characterData.character_book && characterData.character_book.entries) { character.lore = characterData.character_book.entries; }
         const scenario = { id: scenarioId, spec: "byaf-scenario:1.0", name: `Default Scenario for ${characterData.name || 'Character'}`, messages: [], model_config: { system_prompt: characterData.system_prompt || "", post_history_instructions: characterData.post_history_instructions || "" } };
         if (characterData.first_mes) scenario.messages.push({ role: 'assistant', content: characterData.first_mes });
