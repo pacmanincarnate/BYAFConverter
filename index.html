@@ -1,30 +1,453 @@
-{
-  "schemaVersion": 1,
-  "title": "",
-  "canDeleteExampleMessages": false,
-  "exampleMessages": [
-    {
-      "text": "#{character}: I lean across the counter, my eyes twinkling with mischief as I gaze at the customer before me. \"Well, hey there, sugar! Looks like you've got quite the haul there. Planning a little party, are we?\" I wink playfully, my voice dripping with honeyed charm. \"Let me guessâ€”you're whipping up some of your famous BBQ ribs, am I right?\"\n#{character}: As I scan the items, I can't help but hum a jaunty tune, my hips swaying to the rhythm. \"Mmm, I can practically smell those ribs sizzling on the grill. Just imagine itâ€”the sweet, smoky aroma wafting through the air, making your mouth water with anticipation.\" I pause, tapping my chin thoughtfully. \"You know, I've got a secret ingredient that'll take those ribs to the next level. Wanna hear it?\"\n#{character}: Without waiting for a response, I lean in closer, my voice dropping to a conspiratorial whisper. \"Alright, listen up. You take a couple of those peaches you've got there, slice 'em up real nice, and mix 'em with a bit of honey and bourbon. Then, you brush that sweet, sticky goodness all over those ribs just before they're done. Trust me, it'll make your taste buds dance the cha-cha!\" I throw my head back, laughing heartily at my own joke. \"And there you have it, folksâ€”{character}'s secret to the most lip-smackin' ribs this side of the Mississippi!\"\n\n[\\Example {character} responses]",
-      "characterID": "cm56iuayz0016288077yk4kjk"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Character Card Converter (PNG <=> BYAF)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .file-drop-area {
+            transition: all 0.2s ease-in-out;
+        }
+        .file-drop-area.dragover {
+            border-color: #3b82f6;
+            background-color: #eff6ff;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-800 flex items-center justify-center min-h-screen p-4">
+
+    <div class="w-full max-w-2xl mx-auto">
+        <div class="bg-white rounded-xl shadow-lg border border-gray-200">
+            <div class="p-6 sm:p-8">
+                <div class="text-center">
+                    <h1 class="text-2xl sm:text-3xl font-bold text-gray-900">Character Card Converter</h1>
+                    <p class="mt-2 text-gray-600">Automatically convert between PNG cards (V1/V2) and BYAF archives.</p>
+                </div>
+
+                <!-- File Upload Area -->
+                <div class="mt-8">
+                    <label for="file-upload" class="cursor-pointer">
+                        <div id="file-drop-area" class="file-drop-area border-2 border-dashed border-gray-300 rounded-lg p-8 text-center bg-gray-50 hover:bg-gray-100">
+                            <svg class="mx-auto h-12 w-12 text-gray-400" stroke="currentColor" fill="none" viewBox="0 0 48 48" aria-hidden="true">
+                                <path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+                            </svg>
+                            <p class="mt-4 text-sm text-gray-600"><span class="font-semibold text-blue-600">Click to upload</span> or drag and drop</p>
+                            <p class="text-xs text-gray-500 mt-1">PNG or .BYAF file</p>
+                             <p class="text-xs text-gray-500 mt-1 italic">iOS users: Your .byaf file may look like a gray icon. This is normal, please select it.</p>
+                            <p id="file-name" class="text-sm font-medium text-gray-700 mt-2"></p>
+                        </div>
+                    </label>
+                    <input id="file-upload" name="file-upload" type="file" class="sr-only">
+                </div>
+
+                <!-- Status and Download Area -->
+                <div class="mt-6">
+                    <div id="status-display" class="text-center text-sm text-gray-600 p-3 bg-gray-100 rounded-md min-h-[40px] flex items-center justify-center">
+                        Please select a character card to begin.
+                    </div>
+                </div>
+
+                <div class="mt-6">
+                    <button id="download-button" disabled class="w-full bg-blue-600 text-white font-semibold py-3 px-4 rounded-lg shadow-sm hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                        Download File
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script>
+    // --- CRC32 Table for PNG chunk checksum calculation ---
+    const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+        let c = n;
+        for (let k = 0; k < 8; k++) {
+            c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+        }
+        return c;
+    });
+
+    /**
+     * Calculates the CRC32 checksum for a given byte array.
+     * @param {Uint8Array} bytes The data to checksum.
+     * @returns {number} The CRC32 checksum.
+     */
+    function crc32(bytes) {
+        let crc = -1;
+        for (const byte of bytes) {
+            crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ byte) & 0xff];
+        }
+        return (crc ^ -1) >>> 0;
     }
-  ],
-  "model": "llama3.8b.l3-nymeria.gguf_v2.q6_k",
-  "temperature": 1.2,
-  "topP": 0.9,
-  "minP": 0.1,
-  "firstMessages": [
-    {
-      "text": "I'm humming along to the radio as I scan a customer's groceries, my blonde hair swaying with the rhythm. \"That'll be $23.47,\" I chirp, flashing a warm smile. As the next person in line approaches, I can't help but notice their unique style. \"Hey there, gorgeous! Let's see what goodies you've got there,\" I say playfully, my hazel eyes twinkling with curiosity.",
-      "characterID": "cm56iuayz0016288077yk4kjk"
+
+    // --- DOM Element References ---
+    const fileUpload = document.getElementById('file-upload');
+    const fileDropArea = document.getElementById('file-drop-area');
+    const fileNameDisplay = document.getElementById('file-name');
+    const statusDisplay = document.getElementById('status-display');
+    const downloadButton = document.getElementById('download-button');
+
+    let convertedBlob = null;
+    let downloadFilename = 'character';
+
+    // --- Event Handlers ---
+    fileDropArea.addEventListener('dragover', (event) => { event.preventDefault(); fileDropArea.classList.add('dragover'); });
+    fileDropArea.addEventListener('dragleave', () => { fileDropArea.classList.remove('dragover'); });
+    fileDropArea.addEventListener('drop', (event) => {
+        event.preventDefault(); fileDropArea.classList.remove('dragover');
+        const files = event.dataTransfer.files;
+        if (files.length > 0) { fileUpload.files = files; handleFileSelect(files[0]); }
+    });
+    fileUpload.addEventListener('change', (event) => { if (event.target.files.length > 0) { handleFileSelect(event.target.files[0]); } });
+    downloadButton.addEventListener('click', () => {
+        if (convertedBlob) {
+            const url = URL.createObjectURL(convertedBlob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = downloadFilename;
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+    });
+
+    /** Main router function to handle file selection and direct to the correct converter. */
+    async function handleFileSelect(file) {
+        resetState();
+        fileNameDisplay.textContent = file.name;
+        const lowerCaseName = file.name.toLowerCase();
+        
+        if (file.type === 'image/png' || lowerCaseName.endsWith('.png')) {
+            await convertPngToByaf(file);
+        } else if (file.type === 'application/zip' || lowerCaseName.endsWith('.zip') || lowerCaseName.endsWith('.byaf') || file.type === 'application/x-zip-compressed') {
+            await convertByafToPng(file);
+        } else {
+            updateStatus('Error: Unsupported file type. Please upload a PNG or a .byaf archive.', true);
+        }
     }
-  ],
-  "formattingInstructions": "You are {character}, a participant in the roleplay below. You shall incorporate the persona information below when responding to {user} to fully embody {character} realistically in the roleplay. The roleplay shall be in the first person present tense.",
-  "grammar": "",
-  "repeatPenalty": 1.05,
-  "repeatLastN": 256,
-  "topK": 30,
-  "minPEnabled": true,
-  "narrative": "[Example {character} responses]",
-  "promptTemplate": null,
-  "messages": []
-}
+    
+    function utf8_to_b64(str) {
+        return btoa(unescape(encodeURIComponent(str)));
+    }
+    
+    function b64_to_utf8(str) {
+        return decodeURIComponent(escape(atob(str)));
+    }
+
+    /**
+     * Handles the conversion from a BYAF archive to a V2 PNG card.
+     * @param {File} file The BYAF (.zip) file.
+     */
+    async function convertByafToPng(file) {
+        try {
+            updateStatus('Reading BYAF archive...');
+            const zip = await JSZip.loadAsync(file);
+
+            updateStatus('Locating files in archive...');
+            const characterFile = zip.file(/character\.json$/i)[0];
+            const scenarioFile = zip.file(/scenario\d*\.json$/i)[0];
+            const imageFile = zip.file(/\.png$/i)[0];
+            const manifestFile = zip.file('manifest.json');
+
+            if (!characterFile) throw new Error('Could not find character.json in the archive.');
+            if (!scenarioFile) throw new Error('Could not find a scenario file (e.g., scenario.json or scenario1.json) in the archive.');
+            if (!imageFile) throw new Error('Could not find a PNG image in the archive.');
+
+            updateStatus('Parsing character data...');
+            const character = JSON.parse(await characterFile.async('string'));
+            
+            updateStatus('Parsing scenario data...');
+            const scenario = JSON.parse(await scenarioFile.async('string'));
+
+            let authorName = "Unknown";
+            if (manifestFile) {
+                 const manifest = JSON.parse(await manifestFile.async('string'));
+                 if (manifest.author && manifest.author.name) {
+                    authorName = manifest.author.name;
+                 }
+            }
+            
+            updateStatus('Extracting profile image...');
+            const imageBuffer = await imageFile.async('arraybuffer');
+
+            updateStatus('Reconstructing V2 data...');
+            const v2Data = {
+                name: character.displayName || character.name,
+                description: character.persona,
+                personality: '', 
+                creator: authorName,
+                tags: Array.isArray(character.tags) ? character.tags : [],
+                character_book: { entries: character.loreItems || character.lore || [] }
+            };
+
+            if(scenario.firstMessages && scenario.firstMessages.length > 0) {
+                v2Data.first_mes = scenario.firstMessages[0].text;
+            } else if (scenario.messages && scenario.messages.length > 0) {
+                 v2Data.first_mes = scenario.messages.find(m => m.role === 'assistant')?.content || '';
+            }
+
+            if(scenario.exampleMessages && scenario.exampleMessages.length > 0) {
+                 v2Data.mes_example = scenario.exampleMessages.map(e => e.text).join('\n\n');
+            }
+            
+            if(scenario.formattingInstructions) {
+                 v2Data.system_prompt = scenario.formattingInstructions;
+            } else if (scenario.model_config && scenario.model_config.system_prompt) {
+                 v2Data.system_prompt = scenario.model_config.system_prompt;
+            }
+
+            const v2Object = { spec: 'chara_card_v2', data: v2Data };
+            
+            updateStatus('Injecting data into PNG...');
+            convertedBlob = await injectDataIntoPng(imageBuffer, v2Object);
+            
+            const charName = v2Data.name || 'character';
+            downloadFilename = `${charName.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.png`;
+            downloadButton.textContent = 'Download .png File';
+            
+            updateStatus(`Conversion successful for "${charName}"! Ready to download.`, false, true);
+            downloadButton.disabled = false;
+
+        } catch (error) {
+            console.error('BYAF to PNG conversion failed:', error);
+            updateStatus(`Error: ${error.message}`, true);
+        }
+    }
+    
+    /**
+     * Handles the conversion from a PNG card to a BYAF archive.
+     * @param {File} file The PNG file.
+     */
+    async function convertPngToByaf(file) {
+        try {
+            updateStatus('Reading file...');
+            const arrayBuffer = await file.arrayBuffer();
+            const v2DataString = await extractV2Data(arrayBuffer);
+            if (!v2DataString) throw new Error("Scan complete, but no 'chara' keyword found.");
+            
+            updateStatus('Decoding character data...');
+            let v2Object;
+            try { 
+                v2Object = JSON.parse(b64_to_utf8(v2DataString)); 
+            } catch (e) { 
+                console.error("Parsing error:", e);
+                throw new Error("Failed to parse character data. It may be corrupt."); 
+            }
+            
+            let characterData;
+            if (v2Object.data && typeof v2Object.data === 'object') {
+                if (v2Object.spec !== 'chara_card_v2') { updateStatus("Warning: Not a standard V2 card. Attempting conversion..."); }
+                characterData = v2Object.data;
+            } else {
+                updateStatus("V1 or non-standard card detected. Attempting conversion...");
+                characterData = v2Object;
+            }
+            
+            const charName = characterData.name || 'character';
+            updateStatus('Transforming data to BYAF format...');
+            const byafArchive = await createByafArchive(characterData, file);
+
+            updateStatus('Assembling .byaf archive...');
+            convertedBlob = await byafArchive.generateAsync({ type: "blob" });
+            
+            downloadFilename = `${charName.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.byaf`;
+            downloadButton.textContent = 'Download .byaf File';
+            
+            updateStatus(`Conversion successful for "${charName}"! Ready to download.`, false, true);
+            downloadButton.disabled = false;
+        } catch (error)
+        {
+            console.error('PNG to BYAF conversion failed:', error);
+            updateStatus(`Error: ${error.message}`, true);
+        }
+    }
+    
+    function resetState() {
+        downloadButton.disabled = true;
+        convertedBlob = null;
+        downloadFilename = 'character';
+        fileNameDisplay.textContent = '';
+        downloadButton.textContent = 'Download File';
+        updateStatus('Please select a character card to begin.');
+    }
+
+    function updateStatus(message, isError = false, isSuccess = false) {
+        statusDisplay.textContent = message;
+        statusDisplay.classList.remove('text-red-600', 'bg-red-100', 'text-green-600', 'bg-green-100', 'bg-gray-100');
+        if (isError) statusDisplay.classList.add('text-red-600', 'bg-red-100');
+        else if (isSuccess) statusDisplay.classList.add('text-green-600', 'bg-green-100');
+        else statusDisplay.classList.add('bg-gray-100');
+    }
+    
+    async function extractV2Data(arrayBuffer) {
+        const dataView = new DataView(arrayBuffer);
+        const PNG_SIGNATURE = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        for (let i = 0; i < PNG_SIGNATURE.length; i++) { if (dataView.getUint8(i) !== PNG_SIGNATURE[i]) throw new Error("Invalid PNG signature."); }
+        let offset = 8;
+        while (offset < arrayBuffer.byteLength) {
+            const length = dataView.getUint32(offset);
+            const type = String.fromCharCode.apply(null, new Uint8Array(arrayBuffer, offset + 4, 4));
+            if (['tEXt', 'zTXt'].includes(type)) {
+                let keywordEnd = -1;
+                for (let i = 0; i < length; i++) { if (dataView.getUint8(offset + 8 + i) === 0) { keywordEnd = i; break; } }
+                if (keywordEnd !== -1) {
+                    const keyword = new TextDecoder().decode(new Uint8Array(arrayBuffer, offset + 8, keywordEnd));
+                    if (keyword === 'chara') {
+                        if (type === 'tEXt') return new TextDecoder().decode(new Uint8Array(arrayBuffer, offset + 8 + keywordEnd + 1, length - keywordEnd - 1));
+                        if (type === 'zTXt') return new TextDecoder().decode(pako.inflate(new Uint8Array(arrayBuffer, offset + 8 + keywordEnd + 2, length - keywordEnd - 2)));
+                    }
+                }
+            }
+            if (type === 'IEND') break;
+            offset += 12 + length;
+        }
+        return null;
+    }
+
+    async function injectDataIntoPng(imageBuffer, v2Object) {
+        const dataToInject = utf8_to_b64(JSON.stringify(v2Object));
+        const compressedData = pako.deflate(atob(dataToInject));
+        const keyword = 'chara';
+        const chunkData = new Uint8Array(keyword.length + 2 + compressedData.length);
+        
+        chunkData.set(new TextEncoder().encode(keyword));
+        chunkData[keyword.length] = 0; 
+        chunkData[keyword.length + 1] = 0;
+        chunkData.set(compressedData, keyword.length + 2);
+
+        const chunkType = new TextEncoder().encode('zTXt');
+        const dataWithChunkType = new Uint8Array(chunkType.length + chunkData.length);
+        dataWithChunkType.set(chunkType);
+        dataWithChunkType.set(chunkData, chunkType.length);
+        const crc = crc32(dataWithChunkType);
+
+        const originalPng = new Uint8Array(imageBuffer);
+        let iendOffset = -1;
+        for (let i = 8; i < originalPng.length; i++) {
+            if (originalPng[i] === 73 && originalPng[i+1] === 69 && originalPng[i+2] === 78 && originalPng[i+3] === 68) {
+                iendOffset = i - 4; 
+                break;
+            }
+        }
+        if (iendOffset === -1) throw new Error('Could not find IEND chunk in image.');
+        
+        const newPngSize = iendOffset + 12 + chunkData.length + 12;
+        const newPng = new Uint8Array(newPngSize);
+        const newPngView = new DataView(newPng.buffer);
+
+        newPng.set(originalPng.slice(0, iendOffset));
+        newPngView.setUint32(iendOffset, chunkData.length);
+        newPng.set(chunkType, iendOffset + 4);
+        newPng.set(chunkData, iendOffset + 8);
+        newPngView.setUint32(iendOffset + 8 + chunkData.length, crc);
+        newPng.set(originalPng.slice(iendOffset, iendOffset + 12), iendOffset + 12 + chunkData.length);
+        
+        return new Blob([newPng], { type: 'image/png' });
+    }
+    
+    const CUID = (() => {
+        let counter = 0;
+        const fingerprint = Math.random().toString(36).substring(2, 8).padEnd(6, '0');
+        
+        function pad(num, size) {
+            let s = num.toString(36);
+            while (s.length < size) s = "0" + s;
+            return s;
+        }
+
+        return function generateCuid() {
+            const timestamp = pad(Date.now(), 8);
+            counter = (counter + 1) % 46656;
+            const count = pad(counter, 3);
+            const random = Math.random().toString(36).substring(2, 8).padEnd(6, '0') + Math.random().toString(36).substring(2, 8).padEnd(6, '0');
+            return `c${timestamp}${count}${fingerprint}${random}`.substring(0, 25);
+        };
+    })();
+
+    /** Creates a BYAF archive that conforms to the user-provided manifest and character examples. */
+    async function createByafArchive(characterData, pngFile) {
+        const zip = new JSZip();
+        const now = new Date().toISOString();
+        const characterId = CUID();
+        
+        const manifest = {
+            schemaVersion: 1,
+            createdAt: now,
+            characters: [ `characters/${characterId}/character.json` ],
+            scenarios: [ `scenarios/scenario1.json` ]
+        };
+
+        let loreItems = [];
+        if (characterData.character_book?.entries) {
+            loreItems = characterData.character_book.entries.map(entry => ({
+                id: CUID(),
+                order: Math.random().toString(36).substring(2, 8),
+                key: Array.isArray(entry.keys) ? entry.keys.join(', ') : (entry.keys || ''),
+                value: entry.content || "",
+                createdAt: now,
+                updatedAt: now,
+            }));
+        }
+
+        const character = {
+            schemaVersion: 1,
+            name: characterData.name || "",
+            displayName: characterData.name || "",
+            images: [{ path: "images/profile.png", label: "" }],
+            createdAt: now,
+            updatedAt: now,
+            id: characterId,
+            isNSFW: false,
+            persona: characterData.description || "",
+            loreItems: loreItems,
+        };
+        
+        // **FIX**: Build scenario1.json to match the user's "real" example.
+        const scenario = {
+            schemaVersion: 1,
+            title: "",
+            canDeleteExampleMessages: false,
+            exampleMessages: [],
+            model: "", // Default empty
+            temperature: 1.0, // Default
+            topP: 0.9, // Default
+            minP: 0.1, // Default
+            firstMessages: [],
+            formattingInstructions: characterData.system_prompt || "",
+            grammar: "", // Default empty
+            repeatPenalty: 1.05, // Default
+            repeatLastN: 256, // Default
+            topK: 30, // Default
+            minPEnabled: false, // Default
+            narrative: "", // Default empty
+            promptTemplate: null, // Default
+            messages: []
+        };
+
+        if (characterData.first_mes) {
+            scenario.firstMessages.push({ text: characterData.first_mes, characterID: characterId });
+        }
+        if (characterData.alternate_greetings) {
+            characterData.alternate_greetings.forEach(g => scenario.exampleMessages.push({ text: g, characterID: characterId }));
+        }
+        if (characterData.mes_example) {
+             scenario.exampleMessages.push({ text: characterData.mes_example, characterID: characterId });
+        }
+
+        zip.file("manifest.json", JSON.stringify(manifest, null, 2));
+        const charFolder = zip.folder(`characters/${characterId}`);
+        charFolder.file("character.json", JSON.stringify(character, null, 2));
+        charFolder.file("images/profile.png", pngFile);
+        zip.file(`scenarios/scenario1.json`, JSON.stringify(scenario, null, 2));
+        return zip;
+    }
+</script>
+</body>
+</html>
+
+
