@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Character Card Converter (PNG <=> BYAF)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .file-drop-area {
+            transition: all 0.2s ease-in-out;
+        }
+        .file-drop-area.dragover {
+            border-color: #3b82f6;
+            background-color: #eff6ff;
+        }
+        .prose code {
+            color: #d63384;
+            background-color: #f8f9fa;
+            padding: 2px 4px;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+        .prose pre {
+            background-color: #f1f3f5;
+            border-radius: 6px;
+            padding: 1rem;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-800 flex items-center justify-center min-h-screen p-4">
+
+    <div class="w-full max-w-2xl mx-auto">
+        <div class="bg-white rounded-xl shadow-lg border border-gray-200">
+            <div class="p-6 sm:p-8">
+                <div class="text-center">
+                    <h1 class="text-2xl sm:text-3xl font-bold text-gray-900">Character Card Converter</h1>
+                    <p class="mt-2 text-gray-600">Automatically convert between PNG cards (V1/V2) and BYAF archives.</p>
+                </div>
+
+                <!-- File Upload Area -->
+                <div class="mt-8">
+                    <label for="file-upload" class="cursor-pointer">
+                        <div id="file-drop-area" class="file-drop-area border-2 border-dashed border-gray-300 rounded-lg p-8 text-center bg-gray-50 hover:bg-gray-100">
+                            <svg class="mx-auto h-12 w-12 text-gray-400" stroke="currentColor" fill="none" viewBox="0 0 48 48" aria-hidden="true">
+                                <path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+                            </svg>
+                            <p class="mt-4 text-sm text-gray-600"><span class="font-semibold text-blue-600">Click to upload</span> or drag and drop</p>
+                            <p class="text-xs text-gray-500 mt-1">PNG or .BYAF file</p>
+                            <p id="file-name" class="text-sm font-medium text-gray-700 mt-2"></p>
+                        </div>
+                    </label>
+                    <input id="file-upload" name="file-upload" type="file" class="sr-only" accept="image/png,application/zip,.byaf">
+                </div>
+
+                <!-- Status and Download Area -->
+                <div class="mt-6">
+                    <div id="status-display" class="text-center text-sm text-gray-600 p-3 bg-gray-100 rounded-md min-h-[40px] flex items-center justify-center">
+                        Please select a character card to begin.
+                    </div>
+                </div>
+
+                <div class="mt-6">
+                    <button id="download-button" disabled class="w-full bg-blue-600 text-white font-semibold py-3 px-4 rounded-lg shadow-sm hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                        Download File
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script>
+    // --- CRC32 Table for PNG chunk checksum calculation ---
+    const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+        let c = n;
+        for (let k = 0; k < 8; k++) {
+            c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+        }
+        return c;
+    });
+
+    /**
+     * Calculates the CRC32 checksum for a given byte array.
+     * @param {Uint8Array} bytes The data to checksum.
+     * @returns {number} The CRC32 checksum.
+     */
+    function crc32(bytes) {
+        let crc = -1;
+        for (const byte of bytes) {
+            crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ byte) & 0xff];
+        }
+        return (crc ^ -1) >>> 0;
+    }
+
+    // --- DOM Element References ---
+    const fileUpload = document.getElementById('file-upload');
+    const fileDropArea = document.getElementById('file-drop-area');
+    const fileNameDisplay = document.getElementById('file-name');
+    const statusDisplay = document.getElementById('status-display');
+    const downloadButton = document.getElementById('download-button');
+
+    let convertedBlob = null;
+    let downloadFilename = 'character';
+
+    // --- Event Handlers ---
+    fileDropArea.addEventListener('dragover', (event) => { event.preventDefault(); fileDropArea.classList.add('dragover'); });
+    fileDropArea.addEventListener('dragleave', () => { fileDropArea.classList.remove('dragover'); });
+    fileDropArea.addEventListener('drop', (event) => {
+        event.preventDefault(); fileDropArea.classList.remove('dragover');
+        const files = event.dataTransfer.files;
+        if (files.length > 0) { fileUpload.files = files; handleFileSelect(files[0]); }
+    });
+    fileUpload.addEventListener('change', (event) => { if (event.target.files.length > 0) { handleFileSelect(event.target.files[0]); } });
+    downloadButton.addEventListener('click', () => {
+        if (convertedBlob) {
+            const url = URL.createObjectURL(convertedBlob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = downloadFilename;
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+    });
+
+    /** Main router function to handle file selection and direct to the correct converter. */
+    async function handleFileSelect(file) {
+        resetState();
+        fileNameDisplay.textContent = file.name;
+        const lowerCaseName = file.name.toLowerCase();
+        
+        if (file.type === 'image/png' || lowerCaseName.endsWith('.png')) {
+            await convertPngToByaf(file);
+        } else if (file.type === 'application/zip' || lowerCaseName.endsWith('.zip') || lowerCaseName.endsWith('.byaf')) {
+            await convertByafToPng(file);
+        } else {
+            updateStatus('Error: Unsupported file type. Please upload a PNG or a .byaf archive.', true);
+        }
+    }
+
+    /**
+     * Handles the conversion from a BYAF archive to a V2 PNG card.
+     * @param {File} file The BYAF (.zip) file.
+     */
+    async function convertByafToPng(file) {
+        try {
+            updateStatus('Reading BYAF archive...');
+            const zip = await JSZip.loadAsync(file);
+
+            updateStatus('Parsing manifest...');
+            const manifestFile = zip.file('manifest.json');
+            if (!manifestFile) throw new Error('manifest.json not found in archive.');
+            const manifest = JSON.parse(await manifestFile.async('string'));
+
+            if (!manifest.characters || manifest.characters.length === 0) throw new Error('No characters found in manifest.');
+            
+            const characterPath = manifest.characters[0].path;
+            const scenarioPath = manifest.scenarios[0].path;
+
+            updateStatus('Parsing character data...');
+            const characterFile = zip.file(characterPath);
+            if (!characterFile) throw new Error(`Character file not found at ${characterPath}`);
+            const character = JSON.parse(await characterFile.async('string'));
+
+            updateStatus('Parsing scenario data...');
+            const scenarioFile = zip.file(scenarioPath);
+            if (!scenarioFile) throw new Error(`Scenario file not found at ${scenarioPath}`);
+            const scenario = JSON.parse(await scenarioFile.async('string'));
+            
+            updateStatus('Extracting profile image...');
+            const imagePath = `characters/${character.id}/${character.images[0].path}`;
+            const imageFile = zip.file(imagePath);
+            if (!imageFile) throw new Error(`Image file not found at ${imagePath}`);
+            const imageBuffer = await imageFile.async('arraybuffer');
+
+            updateStatus('Reconstructing V2 data...');
+            const v2Data = {
+                name: character.name, description: character.description, personality: character.persona,
+                creator_notes: character.metadata?.creator_notes, creator: manifest.author?.name, tags: character.tags,
+                system_prompt: scenario.model_config?.system_prompt, post_history_instructions: scenario.model_config?.post_history_instructions,
+                character_book: { entries: character.lore || [] }
+            };
+
+            // Heuristics to reconstruct greetings from scenario messages
+            const assistantMessages = scenario.messages.filter(m => m.role === 'assistant');
+            if (assistantMessages.length > 0) v2Data.first_mes = assistantMessages.shift().content;
+            v2Data.alternate_greetings = assistantMessages.map(m => m.content);
+            const exampleDialogue = scenario.messages
+                .map(m => `{{${m.role === 'user' ? 'user' : 'char'}}}
+${m.content}`)
+                .join('\n');
+            v2Data.mes_example = `<START>\n${exampleDialogue}`;
+
+            const v2Object = { spec: 'chara_card_v2', data: v2Data };
+            
+            updateStatus('Injecting data into PNG...');
+            convertedBlob = await injectDataIntoPng(imageBuffer, v2Object);
+            
+            const charName = v2Data.name || 'character';
+            downloadFilename = `${charName.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.png`;
+            downloadButton.textContent = 'Download .png File';
+            
+            updateStatus(`Conversion successful for "${charName}"! Ready to download.`, false, true);
+            downloadButton.disabled = false;
+
+        } catch (error) {
+            console.error('BYAF to PNG conversion failed:', error);
+            updateStatus(`Error: ${error.message}`, true);
+        }
+    }
+    
+    /**
+     * Handles the conversion from a PNG card to a BYAF archive.
+     * @param {File} file The PNG file.
+     */
+    async function convertPngToByaf(file) {
+        try {
+            updateStatus('Reading file...');
+            const arrayBuffer = await file.arrayBuffer();
+            const v2DataString = await extractV2Data(arrayBuffer);
+            if (!v2DataString) throw new Error("Scan complete, but no 'chara' keyword found.");
+            
+            updateStatus('Decoding character data...');
+            let v2Object;
+            try { v2Object = JSON.parse(atob(v2DataString)); } catch (e) { throw new Error("Failed to parse character data. It may be corrupt."); }
+            
+            let characterData;
+            if (v2Object.data && typeof v2Object.data === 'object') {
+                if (v2Object.spec !== 'chara_card_v2') { updateStatus("Warning: Not a standard V2 card. Attempting conversion..."); }
+                characterData = v2Object.data;
+            } else {
+                updateStatus("V1 or non-standard card detected. Attempting conversion...");
+                characterData = v2Object;
+            }
+            
+            const charName = characterData.name || 'character';
+            updateStatus('Transforming data to BYAF format...');
+            const byafArchive = await createByafArchive(characterData, file);
+
+            updateStatus('Assembling .byaf archive...');
+            convertedBlob = await byafArchive.generateAsync({ type: "blob", compression: "STORE" });
+            
+            downloadFilename = `${charName.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.byaf`;
+            downloadButton.textContent = 'Download .byaf File';
+            
+            updateStatus(`Conversion successful for "${charName}"! Ready to download.`, false, true);
+            downloadButton.disabled = false;
+        } catch (error) {
+            console.error('PNG to BYAF conversion failed:', error);
+            updateStatus(`Error: ${error.message}`, true);
+        }
+    }
+    
+    /** Resets the UI to its initial state. */
+    function resetState() {
+        downloadButton.disabled = true;
+        convertedBlob = null;
+        downloadFilename = 'character';
+        fileNameDisplay.textContent = '';
+        downloadButton.textContent = 'Download File';
+        updateStatus('Please select a character card to begin.');
+    }
+
+    /** Updates the status message shown to the user. */
+    function updateStatus(message, isError = false, isSuccess = false) {
+        statusDisplay.textContent = message;
+        statusDisplay.classList.remove('text-red-600', 'bg-red-100', 'text-green-600', 'bg-green-100', 'bg-gray-100');
+        if (isError) statusDisplay.classList.add('text-red-600', 'bg-red-100');
+        else if (isSuccess) statusDisplay.classList.add('text-green-600', 'bg-green-100');
+        else statusDisplay.classList.add('bg-gray-100');
+    }
+    
+    /** Extracts V2 data by manually parsing PNG chunks. */
+    async function extractV2Data(arrayBuffer) {
+        const dataView = new DataView(arrayBuffer);
+        const PNG_SIGNATURE = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        for (let i = 0; i < PNG_SIGNATURE.length; i++) { if (dataView.getUint8(i) !== PNG_SIGNATURE[i]) throw new Error("Invalid PNG signature."); }
+        let offset = 8;
+        while (offset < arrayBuffer.byteLength) {
+            const length = dataView.getUint32(offset);
+            const type = String.fromCharCode.apply(null, new Uint8Array(arrayBuffer, offset + 4, 4));
+            if (['tEXt', 'zTXt'].includes(type)) {
+                let keywordEnd = -1;
+                for (let i = 0; i < length; i++) { if (dataView.getUint8(offset + 8 + i) === 0) { keywordEnd = i; break; } }
+                if (keywordEnd !== -1) {
+                    const keyword = new TextDecoder().decode(new Uint8Array(arrayBuffer, offset + 8, keywordEnd));
+                    if (keyword === 'chara') {
+                        if (type === 'tEXt') return new TextDecoder().decode(new Uint8Array(arrayBuffer, offset + 8 + keywordEnd + 1, length - keywordEnd - 1));
+                        if (type === 'zTXt') return new TextDecoder().decode(pako.inflate(new Uint8Array(arrayBuffer, offset + 8 + keywordEnd + 2, length - keywordEnd - 2)));
+                    }
+                }
+            }
+            if (type === 'IEND') break;
+            offset += 12 + length;
+        }
+        return null;
+    }
+
+    /** Injects a new zTXt chunk with character data into a PNG ArrayBuffer. */
+    async function injectDataIntoPng(imageBuffer, v2Object) {
+        const dataToInject = btoa(JSON.stringify(v2Object));
+        const compressedData = pako.deflate(dataToInject);
+        const keyword = 'chara';
+        const chunkData = new Uint8Array(keyword.length + 2 + compressedData.length);
+        
+        // Build chunk data: keyword + null separator + compression method + compressed data
+        chunkData.set(new TextEncoder().encode(keyword));
+        chunkData[keyword.length] = 0; // Null separator
+        chunkData[keyword.length + 1] = 0; // Compression method 0 (deflate)
+        chunkData.set(compressedData, keyword.length + 2);
+
+        // Build the full chunk
+        const chunkType = new TextEncoder().encode('zTXt');
+        const dataWithChunkType = new Uint8Array(chunkType.length + chunkData.length);
+        dataWithChunkType.set(chunkType);
+        dataWithChunkType.set(chunkData, chunkType.length);
+        const crc = crc32(dataWithChunkType);
+
+        // Find IEND chunk to inject before it
+        const originalPng = new Uint8Array(imageBuffer);
+        let iendOffset = -1;
+        for (let i = 8; i < originalPng.length; i++) {
+            if (originalPng[i] === 73 && originalPng[i+1] === 69 && originalPng[i+2] === 78 && originalPng[i+3] === 68) {
+                iendOffset = i - 4; // Start of IEND chunk length
+                break;
+            }
+        }
+        if (iendOffset === -1) throw new Error('Could not find IEND chunk in image.');
+        
+        const newPngSize = iendOffset + 12 + chunkData.length + 12; // 12 bytes for chunk overhead, 12 for IEND
+        const newPng = new Uint8Array(newPngSize);
+        const newPngView = new DataView(newPng.buffer);
+
+        // Copy original PNG data up to IEND
+        newPng.set(originalPng.slice(0, iendOffset));
+
+        // Add our new chunk
+        newPngView.setUint32(iendOffset, chunkData.length);
+        newPng.set(chunkType, iendOffset + 4);
+        newPng.set(chunkData, iendOffset + 8);
+        newPngView.setUint32(iendOffset + 8 + chunkData.length, crc);
+
+        // Add back the IEND chunk
+        newPng.set(originalPng.slice(iendOffset, iendOffset + 12), iendOffset + 12 + chunkData.length);
+        
+        return new Blob([newPng], { type: 'image/png' });
+    }
+
+    /** Creates the BYAF archive structure in a JSZip instance. */
+    async function createByafArchive(characterData, pngFile) {
+        const zip = new JSZip();
+        const characterId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8); return v.toString(16); });
+        const scenarioId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8); return v.toString(16); });
+        const manifest = { format: "byaf", version: "1.0", created_at: new Date().toISOString(), author: { name: characterData.creator || "Unknown" }, characters: [{ id: characterId, path: `characters/${characterId}/character.json` }], scenarios: [{ id: scenarioId, path: `scenarios/${scenarioId}.json` }] };
+        const character = { id: characterId, spec: "byaf-char:1.0", name: characterData.name || "", description: characterData.description || "", persona: characterData.personality || "", images: [{ label: "profile", path: `images/profile.png` }], lore: [], tags: characterData.tags || [], metadata: { creator_notes: characterData.creator_notes || "" } };
+        if (characterData.character_book && characterData.character_book.entries) { character.lore = characterData.character_book.entries; }
+        const scenario = { id: scenarioId, spec: "byaf-scenario:1.0", name: `Default Scenario for ${characterData.name || 'Character'}`, messages: [], model_config: { system_prompt: characterData.system_prompt || "", post_history_instructions: characterData.post_history_instructions || "" } };
+        if (characterData.first_mes) scenario.messages.push({ role: 'assistant', content: characterData.first_mes });
+        if (characterData.alternate_greetings) characterData.alternate_greetings.forEach(g => scenario.messages.push({ role: 'assistant', content: g, is_example: true }));
+        if (characterData.mes_example) {
+            const msgs = characterData.mes_example.replace(/<START>/gi, '').split(/\{\{(?:user|char|bot)\}\}/i).filter(s => s.trim() !== '');
+            let turn = characterData.mes_example.toLowerCase().includes('{{user}}') ? 'user' : 'assistant';
+            msgs.forEach(msg => { scenario.messages.push({ role: turn, content: msg.trim() }); turn = (turn === 'user' ? 'assistant' : 'user'); });
+        }
+        zip.file("manifest.json", JSON.stringify(manifest, null, 2));
+        const charFolder = zip.folder(`characters/${characterId}`);
+        charFolder.file("character.json", JSON.stringify(character, null, 2));
+        charFolder.file("images/profile.png", pngFile);
+        zip.file(`scenarios/${scenarioId}.json`, JSON.stringify(scenario, null, 2));
+        return zip;
+    }
+</script>
+</body>
+</html>
+
+
