@@ -168,7 +168,7 @@
             if (manifestFile) {
                  const manifest = JSON.parse(await manifestFile.async('string'));
                  if (manifest.author && manifest.author.name) {
-                    authorName = manifest.author.name;
+                     authorName = manifest.author.name;
                  }
             }
             
@@ -192,13 +192,13 @@
             }
 
             if(scenario.exampleMessages && scenario.exampleMessages.length > 0) {
-                 v2Data.mes_example = scenario.exampleMessages.map(e => e.text).join('\n\n');
+                  v2Data.mes_example = scenario.exampleMessages.map(e => e.text).join('\n\n');
             }
             
             if(scenario.formattingInstructions) {
-                 v2Data.system_prompt = scenario.formattingInstructions;
+                  v2Data.system_prompt = scenario.formattingInstructions;
             } else if (scenario.model_config && scenario.model_config.system_prompt) {
-                 v2Data.system_prompt = scenario.model_config.system_prompt;
+                  v2Data.system_prompt = scenario.model_config.system_prompt;
             }
 
             const v2Object = { spec: 'chara_card_v2', data: v2Data };
@@ -369,17 +369,35 @@
         };
     })();
 
-    /** Creates a BYAF archive that conforms to the user-provided manifest and character examples. */
+    /** Creates a BYAF archive, replacing {{char}} and {character} placeholders. */
     async function createByafArchive(characterData, pngFile) {
         const zip = new JSZip();
         const now = new Date().toISOString();
         const characterId = CUID();
-        
+
+        // Get the character name to use for replacements
+        const charName = characterData.name || "";
+        // Create a regex to find all instances of {{char}} or {character}, case-insensitive
+        const placeholderRegex = /\{\{char\}\}|\{character\}/gi;
+
+        /**
+         * Replaces {{char}} or {character} placeholders in a string with the character's name.
+         * @param {string} text The text to process.
+         * @returns {string} The text with placeholders replaced.
+         */
+        const replacePlaceholders = (text) => {
+            // Only attempt to replace if there's text, a name to replace with, and it's a string
+            if (text && typeof text === 'string' && charName) {
+                return text.replace(placeholderRegex, charName);
+            }
+            return text || ""; // Return the original text or an empty string if it's null/undefined
+        };
+
         const manifest = {
             schemaVersion: 1,
             createdAt: now,
-            characters: [ `characters/${characterId}/character.json` ],
-            scenarios: [ `scenarios/scenario1.json` ]
+            characters: [`characters/${characterId}/character.json`],
+            scenarios: [`scenarios/scenario1.json`]
         };
 
         let loreItems = [];
@@ -388,7 +406,7 @@
                 id: CUID(),
                 order: Math.random().toString(36).substring(2, 8),
                 key: Array.isArray(entry.keys) ? entry.keys.join(', ') : (entry.keys || ''),
-                value: entry.content || "",
+                value: replacePlaceholders(entry.content),
                 createdAt: now,
                 updatedAt: now,
             }));
@@ -403,11 +421,10 @@
             updatedAt: now,
             id: characterId,
             isNSFW: false,
-            persona: characterData.description || "",
+            persona: replacePlaceholders(characterData.description),
             loreItems: loreItems,
         };
         
-        // **FIX**: Build scenario1.json to match the user's "real" example.
         const scenario = {
             schemaVersion: 1,
             title: "",
@@ -418,7 +435,7 @@
             topP: 0.9, // Default
             minP: 0.1, // Default
             firstMessages: [],
-            formattingInstructions: characterData.system_prompt || "",
+            formattingInstructions: replacePlaceholders(characterData.system_prompt),
             grammar: "", // Default empty
             repeatPenalty: 1.05, // Default
             repeatLastN: 256, // Default
@@ -430,13 +447,13 @@
         };
 
         if (characterData.first_mes) {
-            scenario.firstMessages.push({ text: characterData.first_mes, characterID: characterId });
+            scenario.firstMessages.push({ text: replacePlaceholders(characterData.first_mes), characterID: characterId });
         }
         if (characterData.alternate_greetings) {
-            characterData.alternate_greetings.forEach(g => scenario.exampleMessages.push({ text: g, characterID: characterId }));
+            characterData.alternate_greetings.forEach(g => scenario.exampleMessages.push({ text: replacePlaceholders(g), characterID: characterId }));
         }
         if (characterData.mes_example) {
-             scenario.exampleMessages.push({ text: characterData.mes_example, characterID: characterId });
+             scenario.exampleMessages.push({ text: replacePlaceholders(characterData.mes_example), characterID: characterId });
         }
 
         zip.file("manifest.json", JSON.stringify(manifest, null, 2));
